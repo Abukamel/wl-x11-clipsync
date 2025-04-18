@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import subprocess
 import traceback
+from bs4 import BeautifulSoup
 
 ##############################################################################
 #                           Utility Functions
@@ -188,7 +189,7 @@ def main():
             print(f"Error: '{tool}' not found in PATH.")
             return
 
-    print("Starting Wayland ↔ X11 clipboard sync...")
+    print("Starting Wayland X11 clipboard sync...")
 
     # Store the last known data (bytes) + MIME for both sides
     last_w_data = b''
@@ -199,65 +200,82 @@ def main():
     while True:
         # clipnotify will wake up on any clipboard change
         p = subprocess.Popen(['clipnotify'])
-        p.wait()
+        p.wait()  # Wait for a clipboard change
 
-        # Read both clipboards
-        w_raw, w_mime = get_wayland_clipboard()
-        x_raw, x_mime = get_x11_clipboard()
+        # Get current clipboard contents for both
+        (w_data, w_mime) = get_wayland_clipboard()
+        (x_data, x_mime) = get_x11_clipboard()
 
-        # Normalize text data to reduce duplicates
-        if is_text_mime(w_mime) and w_raw:
-            w_norm = normalize_text(w_raw)
-        else:
-            w_norm = w_raw
+        # ---> START HTML STRIPPING LOGIC <----
+        if w_mime == 'text/html':
+            try:
+                soup = BeautifulSoup(decode_utf8(w_data), 'html.parser')
+                cleaned_text = soup.get_text()
+                w_data = cleaned_text.encode('utf-8', errors='replace')
+                w_mime = 'text/plain;charset=utf-8'  # Treat as plain text now
+                print("Stripped HTML from Wayland clipboard")
+            except Exception as e:
+                print(f"Error stripping HTML from Wayland: {e}")
+                # Fallback or keep original data?
+                # For now, let's keep original if stripping fails
+                (w_data, w_mime) = get_wayland_clipboard() # Re-fetch original
 
-        if is_text_mime(x_mime) and x_raw:
-            x_norm = normalize_text(x_raw)
-        else:
-            x_norm = x_raw
+        if x_mime == 'text/html':
+            try:
+                soup = BeautifulSoup(decode_utf8(x_data), 'html.parser')
+                cleaned_text = soup.get_text()
+                x_data = cleaned_text.encode('utf-8', errors='replace')
+                x_mime = 'text/plain;charset=utf-8' # Treat as plain text now
+                print("Stripped HTML from X11 clipboard")
+            except Exception as e:
+                print(f"Error stripping HTML from X11: {e}")
+                # Fallback or keep original data?
+                (x_data, x_mime) = get_x11_clipboard() # Re-fetch original
+        # ---> END HTML STRIPPING LOGIC <----
 
-        w_changed = (w_norm != b'' and w_norm != last_w_data)
-        x_changed = (x_norm != b'' and x_norm != last_x_data)
+        # Normalize text data for comparison (if it's text)
+        norm_w_data = normalize_text(w_data) if is_text_mime(w_mime) else w_data
+        norm_x_data = normalize_text(x_data) if is_text_mime(x_mime) else x_data
 
-        if w_changed and not x_changed:
-            # Wayland changed
-            if w_norm != last_x_data:
+        # Sync Wayland → X11 if Wayland changed
+        if w_data != last_w_data and norm_w_data != norm_x_data:
+            if w_data != last_x_data:
                 print(f"[Wayland -> X11] MIME={w_mime}")
-                set_x11_clipboard(w_norm, w_mime)
-                last_x_data = w_norm
+                set_x11_clipboard(w_data, w_mime)
+                last_x_data = w_data
                 last_x_mime = w_mime
 
-            last_w_data = w_norm
+            last_w_data = w_data
             last_w_mime = w_mime
 
-        elif x_changed and not w_changed:
-            # X11 changed
-            if x_norm != last_w_data:
+        # Sync X11 → Wayland if X11 changed
+        elif x_data != last_x_data and norm_x_data != norm_w_data:
+            if x_data != last_w_data:
                 print(f"[X11 -> Wayland] MIME={x_mime}")
-                set_wayland_clipboard(x_norm, x_mime)
-                last_w_data = x_norm
+                set_wayland_clipboard(x_data, x_mime)
+                last_w_data = x_data
                 last_w_mime = x_mime
 
-            last_x_data = x_norm
+            last_x_data = x_data
             last_x_mime = x_mime
 
-        elif w_changed and x_changed:
-            # Both changed - pick Wayland priority
+        # Both changed - pick Wayland priority
+        elif w_data != last_w_data and x_data != last_x_data:
             print(f"[Conflict] Both changed. Preferring Wayland -> X11 (MIME={w_mime})")
-            if w_norm != last_x_data:
-                set_x11_clipboard(w_norm, w_mime)
-                last_x_data = w_norm
+            if w_data != last_x_data:
+                set_x11_clipboard(w_data, w_mime)
+                last_x_data = w_data
                 last_x_mime = w_mime
-            last_w_data = w_norm
+            last_w_data = w_data
             last_w_mime = w_mime
 
         else:
             # Possibly no real difference or empty data
-            if w_norm != b'':
-                last_w_data = w_norm
+            if w_data != b'':
+                last_w_data = w_data
                 last_w_mime = w_mime
-            if x_norm != b'':
-                last_x_data = x_norm
+            if x_data != b'':
+                last_x_data = x_data
                 last_x_mime = x_mime
 
 
